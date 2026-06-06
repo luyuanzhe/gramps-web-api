@@ -250,3 +250,62 @@ def test_non_castable_float():
         "SNPs": 0,
         "comment": "",
     }
+
+
+def test_header_mapping_with_empty_and_extra_columns():
+    """Test mixed-case headers, empty columns, and extra columns."""
+    string = """DNA segment export
+MatchName,,cM,Chromosome,End Location,Extra,Start Location,Side
+John Doe,,10.9,3,64247327,unused,56950055,P
+Jane Doe,,9.9,11,35508918,unused,25878681"""
+    segments = parse_raw_dna_match_string(string)
+    assert len(segments) == 2
+    assert segments[0] == {
+        "chromosome": "3",
+        "start": 56950055,
+        "stop": 64247327,
+        "side": "P",
+        "cM": 10.9,
+        "SNPs": 0,
+        "comment": "John Doe",
+    }
+    assert segments[1] == {
+        "chromosome": "11",
+        "start": 25878681,
+        "stop": 35508918,
+        "side": "U",
+        "cM": 9.9,
+        "SNPs": 0,
+        "comment": "Jane Doe",
+    }
+
+
+def test_skip_multiple_header_rows_and_empty_lines():
+    """Test skipping repeated headers and empty lines."""
+    string = """DNA segment export
+match name,Chromosome,Start Location,End Location,Centimorgans
+
+match name,Chromosome,Start Location,End Location,Centimorgans
+John Doe,3,56950055,64247327,10.9
+
+Jane Doe,11,25878681,35508918,9.9"""
+    segments = parse_raw_dna_match_string(string)
+    assert len(segments) == 2
+    assert segments[0] == {
+        "chromosome": "3",
+        "start": 56950055,
+        "stop": 64247327,
+        "side": "U",
+        "cM": 10.9,
+        "SNPs": 0,
+        "comment": "John Doe",
+    }
+    assert segments[1] == {
+        "chromosome": "11",
+        "start": 25878681,
+        "stop": 35508918,
+        "side": "U",
+        "cM": 9.9,
+        "SNPs": 0,
+        "comment": "Jane Doe",
+    }
