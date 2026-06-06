@@ -19,28 +19,13 @@ SIDE_PATERNAL = "P"
 class SegmentColumnOrder:
     """Order of the columns of a DNA match table."""
 
-    chromosome: int
-    start_position: int
-    end_position: int
-    centimorgans: int
-    num_snps: int | None = None
-    side: int | None = None
-    comment: int | None = None
-
-
-def get_delimiter(rows: list[str]) -> str:
-    """Guess the delimiter of a string containing a CSV-like table.
-
-    It is assumed that the table has at least 4 columns and at least one
-    row.
-    """
-    if rows[0].count("\t") >= 3:
-        return "\t"
-    if rows[0].count(",") >= 3:
-        return ","
-    if rows[0].count(";") >= 3:
-        return ";"
-    raise ValueError("Could not determine delimiter.")
+    chromosome: int | str
+    start_position: int | str
+    end_position: int | str
+    centimorgans: int | str
+    num_snps: int | str | None = None
+    side: int | str | None = None
+    comment: int | str | None = None
 
 
 def is_numeric(value: str) -> bool:
@@ -93,36 +78,41 @@ def has_header(rows: list[str], delimiter: str) -> bool:
     return True
 
 
+def normalize_column_name(name: str) -> str:
+    """Normalize a column name by lowercasing and removing spaces and underscores."""
+    return name.lower().replace(" ", "").replace("_", "")
+
+
 @overload
-def find_column_position(
+def find_column_key(
     column_names: list[str],
     condition: Callable[[str], bool],
-    exclude_indices: Sequence[int],
+    exclude_keys: set[str],
     allow_missing: Literal[False],
-) -> int: ...
+) -> str: ...
 
 
 @overload
-def find_column_position(
+def find_column_key(
     column_names: list[str],
     condition: Callable[[str], bool],
-    exclude_indices: Sequence[int],
+    exclude_keys: set[str],
     allow_missing: Literal[True],
-) -> int | None: ...
+) -> str | None: ...
 
 
-def find_column_position(
+def find_column_key(
     column_names: list[str],
     condition: Callable[[str], bool],
-    exclude_indices: Sequence[int],
+    exclude_keys: set[str],
     allow_missing: bool = False,
-) -> int | None:
-    """Find the position of a column in a list of column names or raise a ValueError."""
-    for i, column in enumerate(column_names):
-        if i in exclude_indices:
+) -> str | None:
+    """Find the key of a column in a list of column names or raise a ValueError."""
+    for column in column_names:
+        if column in exclude_keys:
             continue
-        if condition(column.lower().strip()):
-            return i
+        if condition(column):
+            return column
     if allow_missing:
         return None
     raise ValueError("Column not found.")
@@ -158,57 +148,57 @@ def get_order(
             num_snps=4,
             comment=5,
         )
-    exclude_indices: list[int] = []
-    chromosome = find_column_position(
+    exclude_keys: set[str] = set()
+    chromosome = find_column_key(
         header,
         lambda col: col.startswith("chr"),
-        exclude_indices=exclude_indices,
+        exclude_keys=exclude_keys,
         allow_missing=False,
     )
-    exclude_indices.append(chromosome)
-    start_position = find_column_position(
+    exclude_keys.add(chromosome)
+    start_position = find_column_key(
         header,
         lambda col: "start" in col,
-        exclude_indices=exclude_indices,
+        exclude_keys=exclude_keys,
         allow_missing=False,
     )
-    exclude_indices.append(start_position)
-    end_position = find_column_position(
+    exclude_keys.add(start_position)
+    end_position = find_column_key(
         header,
         lambda col: "end" in col
         or "stop" in col
         or ("length" in col and "morgan" not in col),
-        exclude_indices=exclude_indices,
+        exclude_keys=exclude_keys,
         allow_missing=False,
     )
-    exclude_indices.append(end_position)
-    centimorgans = find_column_position(
+    exclude_keys.add(end_position)
+    centimorgans = find_column_key(
         header,
         lambda col: col.startswith("cm") or "centimorgan" in col or "length" in col,
-        exclude_indices=exclude_indices,
+        exclude_keys=exclude_keys,
         allow_missing=False,
     )
-    exclude_indices.append(centimorgans)
-    num_snps = find_column_position(
+    exclude_keys.add(centimorgans)
+    num_snps = find_column_key(
         header,
         lambda col: "snp" in col,
-        exclude_indices=exclude_indices,
+        exclude_keys=exclude_keys,
         allow_missing=True,
     )
     if num_snps is not None:
-        exclude_indices.append(num_snps)
-    side = find_column_position(
+        exclude_keys.add(num_snps)
+    side = find_column_key(
         header,
         lambda col: col.startswith("side"),
-        exclude_indices=exclude_indices,
+        exclude_keys=exclude_keys,
         allow_missing=True,
     )
     if side is not None:
-        exclude_indices.append(side)
-    comment = find_column_position(
+        exclude_keys.add(side)
+    comment = find_column_key(
         header,
         lambda _: True,  # take the first column that has not been matched yet
-        exclude_indices=exclude_indices,
+        exclude_keys=exclude_keys,
         allow_missing=True,
     )
     return SegmentColumnOrder(
@@ -232,28 +222,67 @@ def transpose_jagged_nested_list(
 def parse_raw_dna_match_string(raw_string: str) -> list[MatchSegment]:
     """Parse a raw DNA match string."""
     rows = raw_string.strip().split("\n")
-    try:
-        delimiter = get_delimiter(rows)
-    except ValueError:
+    rows = [r for r in rows if r.strip() != ""]
+    if not rows:
         return []
-    header: list[str] | None
-    if has_header(rows, delimiter):
-        header = rows[0].split(delimiter)
-        rows = rows[1:]
-    else:
-        header = None
-    data = [row.split(delimiter) for row in rows]
-    data_columns = transpose_jagged_nested_list(data)
-    try:
-        order = get_order(header, data_columns=data_columns)
-    except ValueError:
+
+    delimiter = None
+    header = None
+    order = None
+    start_idx = 0
+
+    for i in range(len(rows)):
+        candidate_rows = rows[i:]
+        for delim in ["\t", ",", ";"]:
+            if candidate_rows[0].count(delim) < 3:
+                continue
+
+            if has_header(candidate_rows, delim):
+                cand_header = [normalize_column_name(col) for col in candidate_rows[0].split(delim)]
+                try:
+                    data = [r.split(delim) for r in candidate_rows[1:]]
+                    data_columns = transpose_jagged_nested_list(data)
+                    order = get_order(cand_header, data_columns=data_columns)
+                    delimiter = delim
+                    header = cand_header
+                    start_idx = i + 1
+                    break
+                except ValueError:
+                    pass
+            else:
+                try:
+                    data = [r.split(delim) for r in candidate_rows]
+                    data_columns = transpose_jagged_nested_list(data)
+                    order = get_order(None, data_columns=data_columns)
+                    delimiter = delim
+                    header = None
+                    start_idx = i
+                    break
+                except ValueError:
+                    pass
+        if delimiter is not None:
+            break
+
+    if delimiter is None or order is None:
         return []
+
+    data = [row.split(delimiter) for row in rows[start_idx:]]
+
     segments = []
-    for row in rows:
-        if row.strip() == "":
-            continue
+    for row_fields in data:
+        if header is not None:
+            row_data: dict[int | str, str] = {
+                header[i]: value
+                for i, value in enumerate(row_fields)
+                if i < len(header)
+            }
+        else:
+            row_data = {
+                i: value
+                for i, value in enumerate(row_fields)
+            }
         try:
-            match_segment = process_row(fields=row.split(delimiter), order=order)
+            match_segment = process_row(row_data, order)
         except (ValueError, TypeError):
             continue
         if match_segment:
@@ -261,31 +290,55 @@ def parse_raw_dna_match_string(raw_string: str) -> list[MatchSegment]:
     return segments
 
 
-def process_row(fields: list[str], order: SegmentColumnOrder) -> MatchSegment | None:
+def process_row(fields: dict[int | str, str], order: SegmentColumnOrder) -> MatchSegment | None:
     """Process a row of a DNA match table."""
-    if len(fields) < 4:
-        return None
     try:
-        chromo = fields[order.chromosome].strip()
-        start = cast_int(fields[order.start_position].strip())
-        stop = cast_int(fields[order.end_position].strip())
-        cms = cast_float(fields[order.centimorgans].strip())
-        if order.num_snps is not None and len(fields) >= order.num_snps + 1:
-            snp = cast_int(fields[order.num_snps].strip())
+        chromo_val = fields.get(order.chromosome)
+        if chromo_val is None:
+            return None
+        chromo = chromo_val.strip()
+
+        start_val = fields.get(order.start_position)
+        if start_val is None:
+            return None
+        start = cast_int(start_val.strip())
+
+        stop_val = fields.get(order.end_position)
+        if stop_val is None:
+            return None
+        stop = cast_int(stop_val.strip())
+
+        cms_val = fields.get(order.centimorgans)
+        if cms_val is None:
+            return None
+        cms = cast_float(cms_val.strip())
+
+        if order.num_snps is not None:
+            snp_val = fields.get(order.num_snps)
+            snp = cast_int(snp_val.strip()) if snp_val else 0
         else:
             snp = 0
-        if order.side is not None and len(fields) >= order.side + 1:
-            side = fields[order.side].strip().upper()
-            if side not in {SIDE_MATERNAL, SIDE_PATERNAL}:
+
+        if order.side is not None:
+            side_val = fields.get(order.side)
+            if side_val:
+                side = side_val.strip().upper()
+                if side not in {SIDE_MATERNAL, SIDE_PATERNAL}:
+                    side = SIDE_UNKNOWN
+            else:
                 side = SIDE_UNKNOWN
         else:
             side = SIDE_UNKNOWN
-        if order.comment is not None and len(fields) >= order.comment + 1:
-            comment = fields[order.comment].strip()
+
+        if order.comment is not None:
+            comment_val = fields.get(order.comment)
+            comment = comment_val.strip() if comment_val else ""
         else:
             comment = ""
-    except (ValueError, TypeError):
+
+    except (ValueError, TypeError, KeyError):
         return None
+
     return {
         "chromosome": chromo,
         "start": start,
