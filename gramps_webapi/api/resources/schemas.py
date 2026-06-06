@@ -348,6 +348,32 @@ class EventProfileSchema(_Base):
     )
 
 
+class PersonRelativesStatsSchema(_Base):
+    """Statistics about a person's relatives."""
+
+    total_relatives = fields.Int(
+        metadata={"description": "Total number of relatives."},
+    )
+    parents = fields.Int(
+        metadata={"description": "Number of parents."},
+    )
+    siblings = fields.Int(
+        metadata={"description": "Number of siblings."},
+    )
+    spouses = fields.Int(
+        metadata={"description": "Number of spouses."},
+    )
+    children = fields.Int(
+        metadata={"description": "Number of children."},
+    )
+    grandparents = fields.Int(
+        metadata={"description": "Number of grandparents."},
+    )
+    grandchildren = fields.Int(
+        metadata={"description": "Number of grandchildren."},
+    )
+
+
 class PersonProfileSchema(_Base):
     """A summary of a person's key biographical information."""
 

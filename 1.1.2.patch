@@ -1,0 +1,222 @@
+diff --git a/gramps_webapi/api/__init__.py b/gramps_webapi/api/__init__.py
+index 3cc0abe..eb71472 100644
+--- a/gramps_webapi/api/__init__.py
++++ b/gramps_webapi/api/__init__.py
+@@ -82,7 +82,7 @@ from .resources.merge import (
+ from .resources.notes import NoteResource, NotesResource
+ from .resources.objects import CreateObjectsResource, DeleteObjectsResource
+ from .resources.ocr import MediaOcrResource
+-from .resources.people import PeopleResource, PersonResource
++from .resources.people import PeopleResource, PersonResource, PersonRelativesStatsResource
+ from .resources.places import PlaceResource, PlacesResource
+ from .resources.relations import RelationResource, RelationsResource
+ from .resources.reports import (
+@@ -247,6 +247,12 @@ register_endpt(
+     PersonYDnaResource, "/people/<string:handle>/ydna", "person-ydna", tags=["DNA"]
+ )
+ register_endpt(PeopleResource, "/people/", "people", tags=["People"])
++register_endpt(
++    PersonRelativesStatsResource,
++    "/people/<string:handle>/relatives/stats",
++    "person-relatives-stats",
++    tags=["People"],
++)
+ register_endpt(
+     MergePersonResource,
+     "/people/<string:phoenix_handle>/merge/<string:titanic_handle>",
+diff --git a/gramps_webapi/api/resources/people.py b/gramps_webapi/api/resources/people.py
+index 61c9ec6..b9d2ebc 100644
+--- a/gramps_webapi/api/resources/people.py
++++ b/gramps_webapi/api/resources/people.py
+@@ -22,15 +22,22 @@
+ 
+ from typing import Dict
+ 
++from flask import abort
+ from gramps.gen.const import GRAMPS_LOCALE as glocale
+ from gramps.gen.lib import Person
+ from gramps.gen.utils.grampslocale import GrampsLocale
+ 
++from ...auth.const import PERM_VIEW_PERSON
++from ..auth import require_permissions
++from ..blueprint import api_blueprint
+ from .base import (
+     GrampsObjectProtectedResource,
+     GrampsObjectResourceHelper,
+     GrampsObjectsProtectedResource,
++    ProtectedResource,
+ )
++from .emit import GrampsJSONEncoder
++from .schemas import PersonRelativesStatsSchema
+ from .util import (
+     get_extended_attributes,
+     get_family_by_handle,
+@@ -83,3 +90,131 @@ class PersonResource(GrampsObjectProtectedResource, PersonResourceHelper):
+ 
+ class PeopleResource(GrampsObjectsProtectedResource, PersonResourceHelper):
+     """People resource."""
++
++
++class PersonRelativesStatsResource(ProtectedResource, GrampsJSONEncoder):
++    """Person relatives stats resource."""
++
++    @api_blueprint.response(200, PersonRelativesStatsSchema())
++    def get(self, handle: str):
++        """Get statistics about a person's relatives."""
++        require_permissions([PERM_VIEW_PERSON])
++        db_handle = self.db_handle
++
++        try:
++            person = db_handle.get_person_from_handle(handle)
++        except Exception:
++            abort(404)
++
++        if not person:
++            abort(404)
++
++        parents = set()
++        siblings = set()
++        spouses = set()
++        children = set()
++        grandparents = set()
++        grandchildren = set()
++
++        # Parents and immediate siblings from parent families
++        for family_handle in person.parent_family_list:
++            try:
++                family = db_handle.get_family_from_handle(family_handle)
++            except Exception:
++                continue
++            if not family:
++                continue
++            if family.father_handle:
++                parents.add(family.father_handle)
++            if family.mother_handle:
++                parents.add(family.mother_handle)
++            for child_ref in family.child_ref_list:
++                if child_ref.ref != person.handle:
++                    siblings.add(child_ref.ref)
++
++        # Siblings (including half-siblings)
++        for parent_handle in parents:
++            try:
++                parent = db_handle.get_person_from_handle(parent_handle)
++            except Exception:
++                continue
++            if not parent:
++                continue
++            for family_handle in parent.family_list:
++                try:
++                    family = db_handle.get_family_from_handle(family_handle)
++                except Exception:
++                    continue
++                if not family:
++                    continue
++                for child_ref in family.child_ref_list:
++                    if child_ref.ref != person.handle:
++                        siblings.add(child_ref.ref)
++
++        # Spouses and Children
++        for family_handle in person.family_list:
++            try:
++                family = db_handle.get_family_from_handle(family_handle)
++            except Exception:
++                continue
++            if not family:
++                continue
++            if family.father_handle and family.father_handle != person.handle:
++                spouses.add(family.father_handle)
++            if family.mother_handle and family.mother_handle != person.handle:
++                spouses.add(family.mother_handle)
++            for child_ref in family.child_ref_list:
++                children.add(child_ref.ref)
++
++        # Grandparents
++        for parent_handle in parents:
++            try:
++                parent = db_handle.get_person_from_handle(parent_handle)
++            except Exception:
++                continue
++            if not parent:
++                continue
++            for family_handle in parent.parent_family_list:
++                try:
++                    family = db_handle.get_family_from_handle(family_handle)
++                except Exception:
++                    continue
++                if not family:
++                    continue
++                if family.father_handle:
++                    grandparents.add(family.father_handle)
++                if family.mother_handle:
++                    grandparents.add(family.mother_handle)
++
++        # Grandchildren
++        for child_handle in children:
++            try:
++                child = db_handle.get_person_from_handle(child_handle)
++            except Exception:
++                continue
++            if not child:
++                continue
++            for family_handle in child.family_list:
++                try:
++                    family = db_handle.get_family_from_handle(family_handle)
++                except Exception:
++                    continue
++                if not family:
++                    continue
++                for child_ref in family.child_ref_list:
++                    grandchildren.add(child_ref.ref)
++
++        all_relatives = parents | siblings | spouses | children | grandparents | grandchildren
++        all_relatives.discard(person.handle)
++
++        payload = {
++            "total_relatives": len(all_relatives),
++            "parents": len(parents),
++            "siblings": len(siblings),
++            "spouses": len(spouses),
++            "children": len(children),
++            "grandparents": len(grandparents),
++            "grandchildren": len(grandchildren)
++        }
++
++        return self.response(200, payload)
+diff --git a/gramps_webapi/api/resources/schemas.py b/gramps_webapi/api/resources/schemas.py
+index ee83769..4836c86 100644
+--- a/gramps_webapi/api/resources/schemas.py
++++ b/gramps_webapi/api/resources/schemas.py
+@@ -348,6 +348,32 @@ class EventProfileSchema(_Base):
+     )
+ 
+ 
++class PersonRelativesStatsSchema(_Base):
++    """Statistics about a person's relatives."""
++
++    total_relatives = fields.Int(
++        metadata={"description": "Total number of relatives."},
++    )
++    parents = fields.Int(
++        metadata={"description": "Number of parents."},
++    )
++    siblings = fields.Int(
++        metadata={"description": "Number of siblings."},
++    )
++    spouses = fields.Int(
++        metadata={"description": "Number of spouses."},
++    )
++    children = fields.Int(
++        metadata={"description": "Number of children."},
++    )
++    grandparents = fields.Int(
++        metadata={"description": "Number of grandparents."},
++    )
++    grandchildren = fields.Int(
++        metadata={"description": "Number of grandchildren."},
++    )
++
++
+ class PersonProfileSchema(_Base):
+     """A summary of a person's key biographical information."""
+ 
