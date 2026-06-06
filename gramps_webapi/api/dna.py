@@ -15,6 +15,16 @@ SIDE_MATERNAL = "M"
 SIDE_PATERNAL = "P"
 
 
+def normalize_column_name(name: str) -> str:
+    """Normalize a column name for comparison.
+
+    Strips whitespace, converts to lowercase, and removes spaces,
+    underscores, and hyphens so that e.g. "Match Name", "MatchName",
+    "match_name", and "match-name" are all treated equivalently.
+    """
+    return re.sub(r"[\s_\-]+", "", name.lower().strip())
+
+
 @dataclass
 class SegmentColumnOrder:
     """Order of the columns of a DNA match table."""
@@ -93,6 +103,28 @@ def has_header(rows: list[str], delimiter: str) -> bool:
     return True
 
 
+def find_header_row_index(rows: list[str], delimiter: str) -> int | None:
+    """Find the index of the header row in a list of rows.
+
+    Scans rows from the top and returns the index of the first row that
+    contains at least two known DNA column-name keywords (e.g. "chr",
+    "start", "end", "cm", "snp").  This supports CSV files that have
+    extra title or metadata rows before the actual column headers.
+    """
+    header_keywords = {"chr", "chrom", "start", "end", "stop", "cm", "centimorgan", "snp"}
+    for i, row in enumerate(rows):
+        if row.strip() == "":
+            continue
+        columns = row.split(delimiter)
+        normalized = [normalize_column_name(col) for col in columns]
+        matches = sum(
+            1 for col in normalized if any(kw in col for kw in header_keywords)
+        )
+        if matches >= 2:
+            return i
+    return None
+
+
 @overload
 def find_column_position(
     column_names: list[str],
@@ -121,7 +153,7 @@ def find_column_position(
     for i, column in enumerate(column_names):
         if i in exclude_indices:
             continue
-        if condition(column.lower().strip()):
+        if condition(normalize_column_name(column)):
             return i
     if allow_missing:
         return None
@@ -237,19 +269,24 @@ def parse_raw_dna_match_string(raw_string: str) -> list[MatchSegment]:
     except ValueError:
         return []
     header: list[str] | None
-    if has_header(rows, delimiter):
+    header_row_index = find_header_row_index(rows, delimiter)
+    if header_row_index is not None:
+        header = rows[header_row_index].split(delimiter)
+        data_rows = rows[header_row_index + 1 :]
+    elif has_header(rows, delimiter):
         header = rows[0].split(delimiter)
-        rows = rows[1:]
+        data_rows = rows[1:]
     else:
         header = None
-    data = [row.split(delimiter) for row in rows]
+        data_rows = rows
+    data = [row.split(delimiter) for row in data_rows if row.strip() != ""]
     data_columns = transpose_jagged_nested_list(data)
     try:
         order = get_order(header, data_columns=data_columns)
     except ValueError:
         return []
     segments = []
-    for row in rows:
+    for row in data_rows:
         if row.strip() == "":
             continue
         try:
@@ -266,21 +303,29 @@ def process_row(fields: list[str], order: SegmentColumnOrder) -> MatchSegment | 
     if len(fields) < 4:
         return None
     try:
+        if order.chromosome >= len(fields):
+            return None
         chromo = fields[order.chromosome].strip()
+        if order.start_position >= len(fields):
+            return None
         start = cast_int(fields[order.start_position].strip())
+        if order.end_position >= len(fields):
+            return None
         stop = cast_int(fields[order.end_position].strip())
+        if order.centimorgans >= len(fields):
+            return None
         cms = cast_float(fields[order.centimorgans].strip())
-        if order.num_snps is not None and len(fields) >= order.num_snps + 1:
+        if order.num_snps is not None and order.num_snps < len(fields):
             snp = cast_int(fields[order.num_snps].strip())
         else:
             snp = 0
-        if order.side is not None and len(fields) >= order.side + 1:
+        if order.side is not None and order.side < len(fields):
             side = fields[order.side].strip().upper()
             if side not in {SIDE_MATERNAL, SIDE_PATERNAL}:
                 side = SIDE_UNKNOWN
         else:
             side = SIDE_UNKNOWN
-        if order.comment is not None and len(fields) >= order.comment + 1:
+        if order.comment is not None and order.comment < len(fields):
             comment = fields[order.comment].strip()
         else:
             comment = ""
