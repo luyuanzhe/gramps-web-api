@@ -80,17 +80,41 @@ def cast_float(value: str) -> float:
         return 0.0
 
 
+def _is_header_row(row: str, delimiter: str) -> bool:
+    """Determine if a single row looks like a header row."""
+    if not row.strip():
+        return False
+    columns = row.split(delimiter)
+    if len(columns) < 4:
+        return False
+    return not any(is_numeric(col) for col in columns)
+
+
+def _get_header_rows(rows: list[str], delimiter: str) -> list[int]:
+    """Find the indices of all consecutive header rows at the start."""
+    header_indices: list[int] = []
+    for i, row in enumerate(rows):
+        if not row.strip():
+            header_indices.append(i)
+            continue
+        if _is_header_row(row, delimiter):
+            header_indices.append(i)
+        else:
+            break
+    return header_indices
+
+
 def has_header(rows: list[str], delimiter: str) -> bool:
     """Determine if the table has a header."""
     if len(rows) < 2:
         return False
-    header = rows[0]
-    if len(header) < 4:
-        return False
-    header_columns = header.split(delimiter)
-    if any(is_numeric(column) for column in header_columns):
-        return False
-    return True
+    header_indices = _get_header_rows(rows, delimiter)
+    return len(header_indices) > 0 and len(header_indices) < len(rows)
+
+
+def _normalize_column_name(name: str) -> str:
+    """Normalize a column name for comparison: lowercase, strip whitespace, collapse spaces."""
+    return re.sub(r"\s+", " ", name.lower().strip())
 
 
 @overload
@@ -121,7 +145,7 @@ def find_column_position(
     for i, column in enumerate(column_names):
         if i in exclude_indices:
             continue
-        if condition(column.lower().strip()):
+        if condition(_normalize_column_name(column)):
             return i
     if allow_missing:
         return None
@@ -231,57 +255,79 @@ def transpose_jagged_nested_list(
 
 def parse_raw_dna_match_string(raw_string: str) -> list[MatchSegment]:
     """Parse a raw DNA match string."""
-    rows = raw_string.strip().split("\n")
+    all_lines = raw_string.strip().split("\n")
+    if not all_lines:
+        return []
     try:
-        delimiter = get_delimiter(rows)
+        delimiter = get_delimiter(all_lines)
     except ValueError:
         return []
     header: list[str] | None
-    if has_header(rows, delimiter):
-        header = rows[0].split(delimiter)
-        rows = rows[1:]
+    if has_header(all_lines, delimiter):
+        header_indices = _get_header_rows(all_lines, delimiter)
+        header_line = all_lines[header_indices[-1]]
+        header = [col.strip().lower() for col in header_line.split(delimiter)]
+        data_rows = all_lines[header_indices[-1] + 1:]
     else:
         header = None
-    data = [row.split(delimiter) for row in rows]
+        data_rows = all_lines
+    data_rows = [row for row in data_rows if row.strip() != ""]
+    if not data_rows:
+        return []
+    data = [row.split(delimiter) for row in data_rows]
     data_columns = transpose_jagged_nested_list(data)
     try:
         order = get_order(header, data_columns=data_columns)
     except ValueError:
         return []
     segments = []
-    for row in rows:
-        if row.strip() == "":
-            continue
+    for row in data_rows:
         try:
             match_segment = process_row(fields=row.split(delimiter), order=order)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, IndexError):
             continue
         if match_segment:
             segments.append(match_segment)
     return segments
 
 
+def _safe_get_field(fields: list[str], index: int) -> str:
+    """Safely get a field from a list by index, returning empty string if out of bounds."""
+    if index < len(fields):
+        return fields[index].strip()
+    return ""
+
+
 def process_row(fields: list[str], order: SegmentColumnOrder) -> MatchSegment | None:
     """Process a row of a DNA match table."""
-    if len(fields) < 4:
-        return None
     try:
-        chromo = fields[order.chromosome].strip()
-        start = cast_int(fields[order.start_position].strip())
-        stop = cast_int(fields[order.end_position].strip())
-        cms = cast_float(fields[order.centimorgans].strip())
-        if order.num_snps is not None and len(fields) >= order.num_snps + 1:
-            snp = cast_int(fields[order.num_snps].strip())
+        chromo = _safe_get_field(fields, order.chromosome)
+        if not chromo:
+            return None
+        start_raw = _safe_get_field(fields, order.start_position)
+        if not start_raw:
+            return None
+        start = cast_int(start_raw)
+        stop_raw = _safe_get_field(fields, order.end_position)
+        if not stop_raw:
+            return None
+        stop = cast_int(stop_raw)
+        cms_raw = _safe_get_field(fields, order.centimorgans)
+        if not cms_raw:
+            return None
+        cms = cast_float(cms_raw)
+        if order.num_snps is not None:
+            snp = cast_int(_safe_get_field(fields, order.num_snps))
         else:
             snp = 0
-        if order.side is not None and len(fields) >= order.side + 1:
-            side = fields[order.side].strip().upper()
+        if order.side is not None:
+            side = _safe_get_field(fields, order.side).upper()
             if side not in {SIDE_MATERNAL, SIDE_PATERNAL}:
                 side = SIDE_UNKNOWN
         else:
             side = SIDE_UNKNOWN
-        if order.comment is not None and len(fields) >= order.comment + 1:
-            comment = fields[order.comment].strip()
+        if order.comment is not None:
+            comment = _safe_get_field(fields, order.comment)
         else:
             comment = ""
     except (ValueError, TypeError):
