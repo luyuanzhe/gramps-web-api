@@ -401,6 +401,32 @@ class PersonProfileSchema(_Base):
     )
 
 
+class PersonRelativesStatsSchema(_Base):
+    """Counts of close relatives for a person."""
+
+    total_relatives = fields.Int(
+        metadata={"description": "Total number of unique relatives across all categories."},
+    )
+    parents = fields.Int(
+        metadata={"description": "Number of parents linked to the person."},
+    )
+    siblings = fields.Int(
+        metadata={"description": "Number of siblings linked through parent families."},
+    )
+    spouses = fields.Int(
+        metadata={"description": "Number of spouses linked through family records."},
+    )
+    children = fields.Int(
+        metadata={"description": "Number of children linked through family records."},
+    )
+    grandparents = fields.Int(
+        metadata={"description": "Number of grandparents reachable through parents."},
+    )
+    grandchildren = fields.Int(
+        metadata={"description": "Number of grandchildren reachable through children."},
+    )
+
+
 class FamilyProfileSchema(_Base):
     """A summary of a family unit."""
 

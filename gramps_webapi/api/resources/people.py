@@ -23,20 +23,28 @@
 from typing import Dict
 
 from gramps.gen.const import GRAMPS_LOCALE as glocale
-from gramps.gen.lib import Person
+from gramps.gen.errors import HandleError
+from gramps.gen.lib import Family, Person
 from gramps.gen.utils.grampslocale import GrampsLocale
 
+from ...auth.const import PERM_VIEW_PERSON
+from ..auth import require_permissions
+from ..blueprint import api_blueprint
+from ..cache import request_cache_decorator
+from ..util import abort_with_message, get_db_handle
+from . import ProtectedResource
 from .base import (
     GrampsObjectProtectedResource,
     GrampsObjectResourceHelper,
     GrampsObjectsProtectedResource,
 )
+from .emit import GrampsJSONEncoder
+from .schemas import PersonRelativesStatsSchema
 from .util import (
     get_extended_attributes,
     get_family_by_handle,
     get_person_profile_for_object,
 )
-
 
 
 class PersonResourceHelper(GrampsObjectResourceHelper):
@@ -79,6 +87,160 @@ class PersonResourceHelper(GrampsObjectResourceHelper):
 
 class PersonResource(GrampsObjectProtectedResource, PersonResourceHelper):
     """Person resource."""
+
+
+class PersonRelativesStatsResource(ProtectedResource, GrampsJSONEncoder):
+    """Person relatives stats resource."""
+
+    @api_blueprint.response(200, PersonRelativesStatsSchema())
+    @request_cache_decorator
+    def get(self, handle: str):
+        """Get counts of relatives for a person."""
+        require_permissions([PERM_VIEW_PERSON])
+        db_handle = get_db_handle()
+        person = self._get_person_or_404(db_handle, handle)
+
+        parents = self._get_parent_handles(db_handle, person)
+        siblings = self._get_sibling_handles(db_handle, person)
+        spouses = self._get_spouse_handles(db_handle, person)
+        children = self._get_child_handles(db_handle, person)
+        grandparents = self._get_grandparent_handles(db_handle, parents)
+        grandchildren = self._get_grandchild_handles(db_handle, children)
+
+        for relative_handles in [
+            parents,
+            siblings,
+            spouses,
+            children,
+            grandparents,
+            grandchildren,
+        ]:
+            relative_handles.discard(person.handle)
+
+        total_relatives = set().union(
+            parents,
+            siblings,
+            spouses,
+            children,
+            grandparents,
+            grandchildren,
+        )
+
+        return self.response(
+            200,
+            {
+                "total_relatives": len(total_relatives),
+                "parents": len(parents),
+                "siblings": len(siblings),
+                "spouses": len(spouses),
+                "children": len(children),
+                "grandparents": len(grandparents),
+                "grandchildren": len(grandchildren),
+            },
+        )
+
+    @staticmethod
+    def _get_person_or_404(db_handle, handle: str) -> Person:
+        try:
+            person = db_handle.get_person_from_handle(handle)
+        except HandleError:
+            abort_with_message(404, "Person not found")
+        if person is None:
+            abort_with_message(404, "Person not found")
+            raise AssertionError
+        return person
+
+    @staticmethod
+    def _get_family_handles(person: Person) -> list[str]:
+        return list(person.get_family_handle_list())
+
+    @staticmethod
+    def _get_parent_family_handles(person: Person) -> list[str]:
+        return list(person.get_parent_family_handle_list())
+
+    @staticmethod
+    def _get_family(db_handle, handle: str) -> Family | None:
+        try:
+            return db_handle.get_family_from_handle(handle)
+        except HandleError:
+            return None
+
+    @classmethod
+    def _get_parent_handles(cls, db_handle, person: Person) -> set[str]:
+        handles = set()
+        for family_handle in cls._get_parent_family_handles(person):
+            family = cls._get_family(db_handle, family_handle)
+            if family is None:
+                continue
+            father_handle = family.get_father_handle()
+            mother_handle = family.get_mother_handle()
+            if father_handle:
+                handles.add(father_handle)
+            if mother_handle:
+                handles.add(mother_handle)
+        handles.discard(person.handle)
+        return handles
+
+    @classmethod
+    def _get_sibling_handles(cls, db_handle, person: Person) -> set[str]:
+        handles = set()
+        for family_handle in cls._get_parent_family_handles(person):
+            family = cls._get_family(db_handle, family_handle)
+            if family is None:
+                continue
+            handles.update(
+                ref.ref for ref in family.get_child_ref_list() if ref.ref and ref.ref != person.handle
+            )
+        return handles
+
+    @classmethod
+    def _get_spouse_handles(cls, db_handle, person: Person) -> set[str]:
+        handles = set()
+        for family_handle in cls._get_family_handles(person):
+            family = cls._get_family(db_handle, family_handle)
+            if family is None:
+                continue
+            for spouse_handle in [family.get_father_handle(), family.get_mother_handle()]:
+                if spouse_handle and spouse_handle != person.handle:
+                    handles.add(spouse_handle)
+        return handles
+
+    @classmethod
+    def _get_child_handles(cls, db_handle, person: Person) -> set[str]:
+        handles = set()
+        for family_handle in cls._get_family_handles(person):
+            family = cls._get_family(db_handle, family_handle)
+            if family is None:
+                continue
+            handles.update(ref.ref for ref in family.get_child_ref_list() if ref.ref)
+        handles.discard(person.handle)
+        return handles
+
+    @classmethod
+    def _get_grandparent_handles(cls, db_handle, parent_handles: set[str]) -> set[str]:
+        handles = set()
+        for parent_handle in parent_handles:
+            try:
+                parent = db_handle.get_person_from_handle(parent_handle)
+            except HandleError:
+                continue
+            if parent is None:
+                continue
+            handles.update(cls._get_parent_handles(db_handle, parent))
+        return handles
+
+    @classmethod
+    def _get_grandchild_handles(cls, db_handle, child_handles: set[str]) -> set[str]:
+        handles = set()
+        for child_handle in child_handles:
+            try:
+                child = db_handle.get_person_from_handle(child_handle)
+            except HandleError:
+                continue
+            if child is None:
+                continue
+            handles.update(cls._get_child_handles(db_handle, child))
+        return handles
 
 
 class PeopleResource(GrampsObjectsProtectedResource, PersonResourceHelper):
