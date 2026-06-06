@@ -1,0 +1,198 @@
+diff --git a/gramps_webapi/api/__init__.py b/gramps_webapi/api/__init__.py
+index 3cc0abe..e12c876 100644
+--- a/gramps_webapi/api/__init__.py
++++ b/gramps_webapi/api/__init__.py
+@@ -82,7 +82,11 @@ from .resources.merge import (
+ from .resources.notes import NoteResource, NotesResource
+ from .resources.objects import CreateObjectsResource, DeleteObjectsResource
+ from .resources.ocr import MediaOcrResource
+-from .resources.people import PeopleResource, PersonResource
++from .resources.people import (
++    PeopleResource,
++    PersonRelativesStatsResource,
++    PersonResource,
++)
+ from .resources.places import PlaceResource, PlacesResource
+ from .resources.relations import RelationResource, RelationsResource
+ from .resources.reports import (
+@@ -237,6 +241,12 @@ register_endpt(
+     tags=["Timeline"],
+ )
+ register_endpt(PersonResource, "/people/<string:handle>", "person", tags=["People"])
++register_endpt(
++    PersonRelativesStatsResource,
++    "/people/<string:handle>/relatives/stats",
++    "person-relatives-stats",
++    tags=["People"],
++)
+ register_endpt(
+     PersonDnaMatchesResource,
+     "/people/<string:handle>/dna/matches",
+diff --git a/gramps_webapi/api/resources/people.py b/gramps_webapi/api/resources/people.py
+index 61c9ec6..d7be456 100644
+--- a/gramps_webapi/api/resources/people.py
++++ b/gramps_webapi/api/resources/people.py
+@@ -20,17 +20,27 @@
+ 
+ """Person API resource."""
+ 
+-from typing import Dict
++from typing import Dict, Set
+ 
++from flask import abort
+ from gramps.gen.const import GRAMPS_LOCALE as glocale
++from gramps.gen.errors import HandleError
+ from gramps.gen.lib import Person
+ from gramps.gen.utils.grampslocale import GrampsLocale
+ 
++from ..auth import require_permissions
++from ..auth.const import PERM_VIEW_PRIVATE
++from ..blueprint import api_blueprint
++from ..cache import request_cache_decorator
++from ..util import get_db_handle
++from . import ProtectedResource
+ from .base import (
+     GrampsObjectProtectedResource,
+     GrampsObjectResourceHelper,
+     GrampsObjectsProtectedResource,
+ )
++from .emit import GrampsJSONEncoder
++from .schemas import PersonRelativesStatsSchema
+ from .util import (
+     get_extended_attributes,
+     get_family_by_handle,
+@@ -83,3 +93,98 @@ class PersonResource(GrampsObjectProtectedResource, PersonResourceHelper):
+ 
+ class PeopleResource(GrampsObjectsProtectedResource, PersonResourceHelper):
+     """People resource."""
++
++
++class PersonRelativesStatsResource(ProtectedResource, GrampsJSONEncoder):
++    """Resource for person relatives statistics."""
++
++    @api_blueprint.response(200, PersonRelativesStatsSchema())
++    @request_cache_decorator
++    def get(self, handle: str):
++        """Get relatives statistics for a person."""
++        require_permissions([PERM_VIEW_PRIVATE])
++        db_handle = get_db_handle()
++        
++        try:
++            person = db_handle.get_person_from_handle(handle)
++        except HandleError:
++            abort(404)
++        
++        stats = {
++            "total_relatives": 0,
++            "parents": 0,
++            "siblings": 0,
++            "spouses": 0,
++            "children": 0,
++            "grandparents": 0,
++            "grandchildren": 0,
++        }
++        
++        relatives: Set[str] = set()
++        
++        parents = set()
++        for fam_handle in person.parent_family_list:
++            family = db_handle.get_family_from_handle(fam_handle)
++            if family.father_handle:
++                parents.add(family.father_handle)
++            if family.mother_handle:
++                parents.add(family.mother_handle)
++        stats["parents"] = len(parents)
++        relatives.update(parents)
++        
++        grandparents = set()
++        for parent_handle in parents:
++            try:
++                parent = db_handle.get_person_from_handle(parent_handle)
++                for fam_handle in parent.parent_family_list:
++                    family = db_handle.get_family_from_handle(fam_handle)
++                    if family.father_handle:
++                        grandparents.add(family.father_handle)
++                    if family.mother_handle:
++                        grandparents.add(family.mother_handle)
++            except HandleError:
++                pass
++        stats["grandparents"] = len(grandparents)
++        relatives.update(grandparents)
++        
++        siblings = set()
++        for fam_handle in person.parent_family_list:
++            family = db_handle.get_family_from_handle(fam_handle)
++            for child_ref in family.child_ref_list:
++                child_handle = child_ref.ref
++                if child_handle != handle:
++                    siblings.add(child_handle)
++        stats["siblings"] = len(siblings)
++        relatives.update(siblings)
++        
++        spouses = set()
++        children = set()
++        for fam_handle in person.family_list:
++            family = db_handle.get_family_from_handle(fam_handle)
++            if family.father_handle == handle and family.mother_handle:
++                spouses.add(family.mother_handle)
++            elif family.mother_handle == handle and family.father_handle:
++                spouses.add(family.father_handle)
++            for child_ref in family.child_ref_list:
++                children.add(child_ref.ref)
++        stats["spouses"] = len(spouses)
++        stats["children"] = len(children)
++        relatives.update(spouses)
++        relatives.update(children)
++        
++        grandchildren = set()
++        for child_handle in children:
++            try:
++                child = db_handle.get_person_from_handle(child_handle)
++                for fam_handle in child.family_list:
++                    family = db_handle.get_family_from_handle(fam_handle)
++                    for child_ref in family.child_ref_list:
++                        grandchildren.add(child_ref.ref)
++            except HandleError:
++                pass
++        stats["grandchildren"] = len(grandchildren)
++        relatives.update(grandchildren)
++        
++        stats["total_relatives"] = len(relatives)
++        
++        return self.response(200, stats)
+diff --git a/gramps_webapi/api/resources/schemas.py b/gramps_webapi/api/resources/schemas.py
+index ee83769..e35a25d 100644
+--- a/gramps_webapi/api/resources/schemas.py
++++ b/gramps_webapi/api/resources/schemas.py
+@@ -2501,5 +2501,31 @@ class TreeSchema(_Base):
+     )
+ 
+ 
++class PersonRelativesStatsSchema(_Base):
++    """Statistics about the relatives of a person."""
++
++    total_relatives = fields.Int(
++        metadata={"description": "Total number of relatives."},
++    )
++    parents = fields.Int(
++        metadata={"description": "Number of parents."},
++    )
++    siblings = fields.Int(
++        metadata={"description": "Number of siblings."},
++    )
++    spouses = fields.Int(
++        metadata={"description": "Number of spouses."},
++    )
++    children = fields.Int(
++        metadata={"description": "Number of children."},
++    )
++    grandparents = fields.Int(
++        metadata={"description": "Number of grandparents."},
++    )
++    grandchildren = fields.Int(
++        metadata={"description": "Number of grandchildren."},
++    )
++
++
+ class TreeConfigSchema(_Base):
+     """Per-tree configuration blob (free-form JSON object)."""
