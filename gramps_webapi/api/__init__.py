@@ -82,7 +82,7 @@ from .resources.merge import (
 from .resources.notes import NoteResource, NotesResource
 from .resources.objects import CreateObjectsResource, DeleteObjectsResource
 from .resources.ocr import MediaOcrResource
-from .resources.people import PeopleResource, PersonResource
+from .resources.people import PeopleResource, PersonResource, PersonRelativeStatsResource
 from .resources.places import PlaceResource, PlacesResource
 from .resources.relations import RelationResource, RelationsResource
 from .resources.reports import (
@@ -245,6 +245,12 @@ register_endpt(
 )
 register_endpt(
     PersonYDnaResource, "/people/<string:handle>/ydna", "person-ydna", tags=["DNA"]
+)
+register_endpt(
+    PersonRelativeStatsResource,
+    "/people/<string:handle>/relatives/stats",
+    "person-relatives-stats",
+    tags=["People"],
 )
 register_endpt(PeopleResource, "/people/", "people", tags=["People"])
 register_endpt(

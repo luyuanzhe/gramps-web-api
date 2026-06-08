@@ -2503,3 +2503,29 @@ class TreeSchema(_Base):
 
 class TreeConfigSchema(_Base):
     """Per-tree configuration blob (free-form JSON object)."""
+
+
+class RelativeStatsSchema(_Base):
+    """Relative count statistics for a person."""
+
+    total_relatives = fields.Int(
+        metadata={"description": "Total number of relatives."},
+    )
+    parents = fields.Int(
+        metadata={"description": "Number of parents."},
+    )
+    siblings = fields.Int(
+        metadata={"description": "Number of siblings."},
+    )
+    spouses = fields.Int(
+        metadata={"description": "Number of spouses."},
+    )
+    children = fields.Int(
+        metadata={"description": "Number of children."},
+    )
+    grandparents = fields.Int(
+        metadata={"description": "Number of grandparents."},
+    )
+    grandchildren = fields.Int(
+        metadata={"description": "Number of grandchildren."},
+    )

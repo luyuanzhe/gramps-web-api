@@ -1,0 +1,227 @@
+diff --git a/gramps_webapi/api/__init__.py b/gramps_webapi/api/__init__.py
+index 3cc0abe..356bb84 100644
+--- a/gramps_webapi/api/__init__.py
++++ b/gramps_webapi/api/__init__.py
+@@ -82,7 +82,7 @@ from .resources.merge import (
+ from .resources.notes import NoteResource, NotesResource
+ from .resources.objects import CreateObjectsResource, DeleteObjectsResource
+ from .resources.ocr import MediaOcrResource
+-from .resources.people import PeopleResource, PersonResource
++from .resources.people import PeopleResource, PersonResource, PersonRelativeStatsResource
+ from .resources.places import PlaceResource, PlacesResource
+ from .resources.relations import RelationResource, RelationsResource
+ from .resources.reports import (
+@@ -246,6 +246,12 @@ register_endpt(
+ register_endpt(
+     PersonYDnaResource, "/people/<string:handle>/ydna", "person-ydna", tags=["DNA"]
+ )
++register_endpt(
++    PersonRelativeStatsResource,
++    "/people/<string:handle>/relatives/stats",
++    "person-relatives-stats",
++    tags=["People"],
++)
+ register_endpt(PeopleResource, "/people/", "people", tags=["People"])
+ register_endpt(
+     MergePersonResource,
+diff --git a/gramps_webapi/api/resources/people.py b/gramps_webapi/api/resources/people.py
+index 61c9ec6..2e5f278 100644
+--- a/gramps_webapi/api/resources/people.py
++++ b/gramps_webapi/api/resources/people.py
+@@ -22,22 +22,162 @@
+ 
+ from typing import Dict
+ 
++from flask import Response, abort
+ from gramps.gen.const import GRAMPS_LOCALE as glocale
+ from gramps.gen.lib import Person
+ from gramps.gen.utils.grampslocale import GrampsLocale
++from marshmallow import Schema
++from webargs import fields, validate
+ 
++from ...types import Handle
++from ..blueprint import api_blueprint
++from ..util import get_db_handle
++from . import ProtectedResource
+ from .base import (
+     GrampsObjectProtectedResource,
+     GrampsObjectResourceHelper,
+     GrampsObjectsProtectedResource,
+ )
++from .emit import GrampsJSONEncoder
++from .schemas import RelativeStatsSchema
+ from .util import (
+     get_extended_attributes,
+     get_family_by_handle,
++    get_person_by_handle,
+     get_person_profile_for_object,
+ )
+ 
+ 
++def _get_parent_handles(db_handle, person: Person):
++    """Get handles of parents from primary parent family."""
++    parents = set()
++    primary_family_handle = person.get_main_parents_family_handle()
++    if primary_family_handle:
++        family = get_family_by_handle(db_handle, primary_family_handle)
++        if family and not isinstance(family, dict):
++            if family.father_handle:
++                parents.add(family.father_handle)
++            if family.mother_handle:
++                parents.add(family.mother_handle)
++    return parents
++
++
++def _get_sibling_handles(db_handle, person: Person):
++    """Get handles of siblings (excluding self)."""
++    siblings = set()
++    for family_handle in person.parent_family_list:
++        family = get_family_by_handle(db_handle, family_handle)
++        if family and not isinstance(family, dict):
++            for child_ref in family.child_ref_list:
++                if child_ref.ref != person.handle:
++                    siblings.add(child_ref.ref)
++    return siblings
++
++
++def _get_spouse_handles(db_handle, person: Person):
++    """Get handles of spouses from family_list."""
++    spouses = set()
++    for family_handle in person.family_list:
++        family = get_family_by_handle(db_handle, family_handle)
++        if family and not isinstance(family, dict):
++            if family.father_handle and family.father_handle != person.handle:
++                spouses.add(family.father_handle)
++            if family.mother_handle and family.mother_handle != person.handle:
++                spouses.add(family.mother_handle)
++    return spouses
++
++
++def _get_child_handles(db_handle, person: Person):
++    """Get handles of children from family_list."""
++    children = set()
++    for family_handle in person.family_list:
++        family = get_family_by_handle(db_handle, family_handle)
++        if family and not isinstance(family, dict):
++            for child_ref in family.child_ref_list:
++                children.add(child_ref.ref)
++    return children
++
++
++def _get_grandparent_handles(db_handle, person: Person):
++    """Get handles of grandparents (parents of parents)."""
++    grandparents = set()
++    parent_handles = _get_parent_handles(db_handle, person)
++    for parent_handle in parent_handles:
++        parent = get_person_by_handle(db_handle, parent_handle)
++        if parent and not isinstance(parent, dict):
++            gp_handles = _get_parent_handles(db_handle, parent)
++            grandparents.update(gp_handles)
++    return grandparents
++
++
++def _get_grandchild_handles(db_handle, person: Person):
++    """Get handles of grandchildren (children of children)."""
++    grandchildren = set()
++    child_handles = _get_child_handles(db_handle, person)
++    for child_handle in child_handles:
++        child = get_person_by_handle(db_handle, child_handle)
++        if child and not isinstance(child, dict):
++            gc_handles = _get_child_handles(db_handle, child)
++            grandchildren.update(gc_handles)
++    return grandchildren
++
++
++class RelativeStatsQueryArgs(Schema):
++    """Query arguments for relative stats endpoint."""
++
++    include_self = fields.Boolean(
++        load_default=False,
++        metadata={
++            "description": "If true, include the person themselves in total_relatives count."
++        },
++    )
++
++
++class PersonRelativeStatsResource(ProtectedResource, GrampsJSONEncoder):
++    """Relative statistics resource for a person."""
++
++    @api_blueprint.response(200, RelativeStatsSchema())
++    @api_blueprint.arguments(RelativeStatsQueryArgs, location="query")
++    def get(self, args: Dict, handle: Handle) -> Response:
++        """Get relative count statistics for a person."""
++        db_handle = get_db_handle()
++        person = get_person_by_handle(db_handle, handle)
++        if person == {}:
++            abort(404)
++
++        parent_handles = _get_parent_handles(db_handle, person)
++        sibling_handles = _get_sibling_handles(db_handle, person)
++        spouse_handles = _get_spouse_handles(db_handle, person)
++        child_handles = _get_child_handles(db_handle, person)
++        grandparent_handles = _get_grandparent_handles(db_handle, person)
++        grandchild_handles = _get_grandchild_handles(db_handle, person)
++
++        all_relatives = set()
++        all_relatives.update(parent_handles)
++        all_relatives.update(sibling_handles)
++        all_relatives.update(spouse_handles)
++        all_relatives.update(child_handles)
++        all_relatives.update(grandparent_handles)
++        all_relatives.update(grandchild_handles)
++
++        total = len(all_relatives)
++        if args.get("include_self"):
++            total += 1
++
++        return self.response(
++            200,
++            {
++                "total_relatives": total,
++                "parents": len(parent_handles),
++                "siblings": len(sibling_handles),
++                "spouses": len(spouse_handles),
++                "children": len(child_handles),
++                "grandparents": len(grandparent_handles),
++                "grandchildren": len(grandchild_handles),
++            },
++        )
++
++
+ 
+ class PersonResourceHelper(GrampsObjectResourceHelper):
+     """Person resource helper."""
+diff --git a/gramps_webapi/api/resources/schemas.py b/gramps_webapi/api/resources/schemas.py
+index ee83769..aedc434 100644
+--- a/gramps_webapi/api/resources/schemas.py
++++ b/gramps_webapi/api/resources/schemas.py
+@@ -2503,3 +2503,29 @@ class TreeSchema(_Base):
+ 
+ class TreeConfigSchema(_Base):
+     """Per-tree configuration blob (free-form JSON object)."""
++
++
++class RelativeStatsSchema(_Base):
++    """Relative count statistics for a person."""
++
++    total_relatives = fields.Int(
++        metadata={"description": "Total number of relatives."},
++    )
++    parents = fields.Int(
++        metadata={"description": "Number of parents."},
++    )
++    siblings = fields.Int(
++        metadata={"description": "Number of siblings."},
++    )
++    spouses = fields.Int(
++        metadata={"description": "Number of spouses."},
++    )
++    children = fields.Int(
++        metadata={"description": "Number of children."},
++    )
++    grandparents = fields.Int(
++        metadata={"description": "Number of grandparents."},
++    )
++    grandchildren = fields.Int(
++        metadata={"description": "Number of grandchildren."},
++    )
